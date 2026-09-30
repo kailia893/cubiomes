@@ -80,7 +80,7 @@ int main()
 }
 ```
 
-You can compile this code by creating a shared library (`libcubiomes.so`, `libcubiomes.dylib` or `cubiomes.dll` depending on your OS) or an archive (`libcubiomes_static.a`) using the CMake build script:
+You can compile this code by creating a shared library (`libcubiomes.so`, `libcubiomes.dylib` or `cubiomes.dll` depending on your OS) or a static archive (`libcubiomes.a`) using the CMake build script:
 ```shell
 $ cd cubiomes
 $ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -89,9 +89,13 @@ $ cmake --build build
 Then you can compile your program, while linking the archive or shared library, using either of the following commands.
 ```shell
 $ gcc find_biome_at.c -Lbuild -Wl,-rpath,build -lcubiomes -O3 -Wall -Wextra -fwrapv -lm # dynamic
-$ gcc find_biome_at.c -Lbuild -lcubiomes_static -O3 -Wall -Wextra -fwrapv -lm # static
+$ gcc find_biome_at.c build/libcubiomes.a -O3 -Wall -Wextra -fwrapv -lm # static
 ```
 Both commands assume that your source code is saved as `find_biome_at.c` in the Cubiomes working directory. If your makefile is configured to use pthreads, you may also need to add the `-lpthread` option for the compiler.
+
+### Large-Biome Climate Noise
+
+For the runnable example, build instructions, and octave reference tables, see [examples/lb_noise.md](examples/lb_noise.md).
 
 The option `-fwrapv` enforces two's complement for signed integer overflow, which is otherwise undefined behavior. It is not really necessary for this example, but it is a common pitfall when dealing with code that emulates the behavior of Java.
 

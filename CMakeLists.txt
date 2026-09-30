@@ -213,6 +213,7 @@ set_property(TARGET objects PROPERTY POSITION_INDEPENDENT_CODE 1)
 
 add_library(cubiomes SHARED $<TARGET_OBJECTS:objects>)
 add_library(cubiomes_static STATIC $<TARGET_OBJECTS:objects>)
+set_target_properties(cubiomes_static PROPERTIES OUTPUT_NAME cubiomes)
 
 if (WIN32)
 	set_target_properties(cubiomes PROPERTIES PREFIX "")
