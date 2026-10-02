@@ -87,7 +87,7 @@ double lb_octave(LbNoise *n, int p, int o, char ab, double x, double z)
 }
 
 int lb_octave_int(LbNoise *n, int p, int o, char ab, double x, double z){
-    return (int)(lb_octave(n, p, o, ab, x, z) * 10000);
+    return (int)(lb_octave(n, p, o, ab, x/4, z/4) * 10000);
 }
 
 int lb_octave_prefix_sum(LbNoise *n, int p, int o, double x, double z){
