@@ -1,5 +1,5 @@
 #include "lb_noise.h"
-//Compile: gcc lb_noise_demo.c lb_noise.c libcubiomes.a -pthread -lm -o test
+//Compile: gcc -O3 -fwrapv lb_noise_demo.c lb_noise.c libcubiomes.a -pthread -lm -o test
 #include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -53,36 +53,75 @@ int multipliers[4][2] = {
 static pthread_mutex_t output_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int progress_line_active;
 
-int check_candidate_seed(uint64_t seed, int64_t x, int64_t z) {
-    LbNoise n = {0};
-    lb_setseed(&n, seed);
+#define FLOOD_QUEUE_CAPACITY 20000
+#define FLOOD_HASH_CAPACITY 65536
+
+typedef struct {
+    int queue[FLOOD_QUEUE_CAPACITY][2];
+    uint64_t keys[FLOOD_HASH_CAPACITY];
+    uint32_t generations[FLOOD_HASH_CAPACITY];
+    uint32_t generation;
+} FloodFillScratch;
+
+static int floodfill_mark(FloodFillScratch *scratch, int x, int z)
+{
+    uint64_t key = ((uint64_t)(uint32_t)x << 32) | (uint32_t)z;
+    uint64_t hash = key;
+    size_t slot;
+
+    hash ^= hash >> 33;
+    hash *= UINT64_C(0xff51afd7ed558ccd);
+    hash ^= hash >> 33;
+    hash *= UINT64_C(0xc4ceb9fe1a85ec53);
+    hash ^= hash >> 33;
+    slot = (size_t)hash & (FLOOD_HASH_CAPACITY - 1);
+    while (scratch->generations[slot] == scratch->generation) {
+        if (scratch->keys[slot] == key)
+            return 0;
+        slot = (slot + 1) & (FLOOD_HASH_CAPACITY - 1);
+    }
+    scratch->generations[slot] = scratch->generation;
+    scratch->keys[slot] = key;
+    return 1;
+}
+
+int check_candidate_seed(LbNoise *n, int64_t x, int64_t z,
+    FloodFillScratch *scratch, const int erosion_order[4], int *cells_visited) {
     //Early filters
     for (int i = 0; i < 4; i++) {
-        if (lb_octave_prefix_sum(&n, NP_EROSION, 4, 
-            x + positions[i][0], z + positions[i][1]) > -4000) return 0;
+        int position = erosion_order[i];
+        if (lb_octave_prefix_sum(n, NP_EROSION, 4, 
+            x + positions[position][0], z + positions[position][1]) > -4000) return 0;
     }
     for (int i = 0; i < 4; i++) {
-        if (lb_octave_prefix_sum(&n, NP_HUMIDITY, 2, 
+        if (lb_octave_prefix_sum(n, NP_HUMIDITY, 2, 
             x + positions[i][0], z + positions[i][1]) < 1000) return 1;
     }
     for (int i = 0; i < 4; i++) {
-        if (lb_octave_prefix_sum(&n, NP_TEMPERATURE, 4, 
+        if (lb_octave_prefix_sum(n, NP_TEMPERATURE, 4, 
             x + positions[i][0], z + positions[i][1]) < 5500) return 2;
     }
     for (int i = 0; i < 4; i++) {
-        if (lb_octave_prefix_sum(&n, NP_CONTINENTALNESS, 2, 
+        if (lb_octave_prefix_sum(n, NP_CONTINENTALNESS, 2, 
             x + positions[i][0], z + positions[i][1]) < 0) return 3;
     }
-    if (lb_octave_prefix_sum(&n, NP_TEMPERATURE, 4, x, z) < 5500) return 4;
+    if (lb_octave_prefix_sum(n, NP_TEMPERATURE, 4, x, z) < 5500) return 4;
     for (int i = 0; i < 6; i++) {
         for (int j = 0; j < 4; j++) {
-            if (lb_octave_prefix_sum(&n, NP_TEMPERATURE, 4, 
+            if (lb_octave_prefix_sum(n, NP_TEMPERATURE, 4, 
                 x + templimit[i][0] * multipliers[j][0], 
                 z + templimit[i][1] * multipliers[j][1]) > 5500) return 5;
         }
     }
     //Floodfill
-    int queue[20000][2] = {{x, z}};
+    if (++scratch->generation == 0) {
+        memset(scratch->generations, 0, sizeof(scratch->generations));
+        scratch->generation = 1;
+    }
+    int (*queue)[2] = scratch->queue;
+    queue[0][0] = (int)x;
+    queue[0][1] = (int)z;
+    floodfill_mark(scratch, queue[0][0], queue[0][1]);
     int head = 0;
     int tail = 1;
     int visited = 0;
@@ -90,25 +129,19 @@ int check_candidate_seed(uint64_t seed, int64_t x, int64_t z) {
         int cx = queue[head][0];
         int cz = queue[head][1];
         head++;
-        int temperature = lb_octave_prefix_sum(&n, NP_TEMPERATURE, 4, cx, cz);
+        int temperature = lb_octave_prefix_sum(n, NP_TEMPERATURE, 4, cx, cz);
         if (temperature < 5500) {
             continue;
         }
-        int humidity = lb_octave_prefix_sum(&n, NP_HUMIDITY, 2, cx, cz);
-        if (humidity < 1000) {
-            printf("Humidity too low at (%d, %d): %d\n", cx, cz, humidity);
+        int humidity = lb_octave_prefix_sum(n, NP_HUMIDITY, 2, cx, cz);
+        if (humidity < 1000)
             return 6;
-        }
-        int erosion = lb_octave_prefix_sum(&n, NP_EROSION, 4, cx, cz);
-        if (erosion > -4000) {
-            printf("Erosion too high at (%d, %d): %d\n", cx, cz, erosion);
+        int erosion = lb_octave_prefix_sum(n, NP_EROSION, 4, cx, cz);
+        if (erosion > -4000)
             return 6;
-        }
-        int continental = lb_octave_prefix_sum(&n, NP_CONTINENTALNESS, 2, cx, cz);
-        if (continental < 0) {
-            printf("Continentalness too low at (%d, %d): %d\n", cx, cz, continental);
+        int continental = lb_octave_prefix_sum(n, NP_CONTINENTALNESS, 2, cx, cz);
+        if (continental < 0)
             return 6;
-        }
         visited++;
         int dx[4] = {256, -256, 0, 0};
         int dz[4] = {0, 0, 256, -256};
@@ -118,32 +151,24 @@ int check_candidate_seed(uint64_t seed, int64_t x, int64_t z) {
             if (nx < -30000000 || nx > 30000000 || nz < -30000000 || nz > 30000000) {
                 continue;
             }
-            int duplicate = 0;
-            for (int i = 0; i < tail; i++) {
-                if (queue[i][0] == nx && queue[i][1] == nz) {
-                    duplicate = 1;
-                    break;
-                }
-            }
-            if (duplicate) {
+            if (!floodfill_mark(scratch, nx, nz)) {
                 continue;
             }
-            if (tail >= 20000) {
-                printf("Queue overflow, visited: %d\n", visited);
-                return 65535 * visited;
+            if (tail >= FLOOD_QUEUE_CAPACITY) {
+                return 6;
             }
             queue[tail][0] = nx;
             queue[tail][1] = nz;
             tail++;
         }
     }
+    *cells_visited = visited;
     return 65535 * visited;
 }
 typedef struct {
-    int id;
-    int64_t start_seed;
-    int64_t end_seed;
-    int64_t best[4];
+    uint64_t start_seed_bits;
+    uint64_t seed_count;
+    FILE *results_file;
     atomic_uint_fast64_t *completed_seeds;
     atomic_uint *finished_threads;
 } WorkerArgs;
@@ -169,11 +194,36 @@ static int parse_positive_u64(const char *text, uint64_t *value)
     return 1;
 }
 
+static int parse_i64(const char *text, int64_t *value)
+{
+    char *end;
+    intmax_t parsed;
+
+    if (!text || !*text)
+        return 0;
+    errno = 0;
+    parsed = strtoimax(text, &end, 10);
+    if (errno || *end || parsed < INT64_MIN || parsed > INT64_MAX)
+        return 0;
+    *value = (int64_t)parsed;
+    return 1;
+}
+
+static int64_t seed_from_bits(uint64_t bits)
+{
+    const uint64_t sign_bit = UINT64_C(1) << 63;
+
+    if (bits < sign_bit)
+        return (int64_t)bits;
+    return INT64_MIN + (int64_t)(bits - sign_bit);
+}
+
 static void *worker_thread(void *data) {
     WorkerArgs *args = data;
-    int64_t *best = args->best;
-    for (int64_t i = args->start_seed; i < args->end_seed; i++) {
-        LbNoise n = {0};
+    LbNoise n = {0};
+    FloodFillScratch scratch = {0};
+    for (uint64_t offset = 0; offset < args->seed_count; offset++) {
+        int64_t i = seed_from_bits(args->start_seed_bits + offset);
         lb_setseed(&n, to_unsigned(i));
         int bad = 0;
         for (int j = 0; j < 5; j++) {
@@ -190,13 +240,24 @@ static void *worker_thread(void *data) {
             int x = tile1[j][0];
             int z = tile1[j][1];
             int notbad = 1;
+            int erosion_a0[5];
+            int erosion_order[4] = {0, 1, 2, 3};
             for (int k = 0; k < 5; k++) {
-                if (lb_octave_int(&n, NP_EROSION, 0, 'A', 
-                    x + positions[k][0], z + positions[k][1]
-                    ) > 0) notbad = 0;
+                erosion_a0[k] = lb_octave_int(&n, NP_EROSION, 0, 'A',
+                    x + positions[k][0], z + positions[k][1]);
+                if (erosion_a0[k] > 0) notbad = 0;
                 if (!notbad) break;
             }
             if(!notbad) continue;
+            for (int k = 0; k < 4; k++) {
+                for (int l = k + 1; l < 4; l++) {
+                    if (erosion_a0[erosion_order[l]] > erosion_a0[erosion_order[k]]) {
+                        int swap = erosion_order[k];
+                        erosion_order[k] = erosion_order[l];
+                        erosion_order[l] = swap;
+                    }
+                }
+            }
             for (int k = 0; k < 5; k++) {
                 if (lb_octave_int(&n, NP_CONTINENTALNESS, 0, 'A', 
                     x + positions[k][0], z + positions[k][1]
@@ -221,17 +282,22 @@ static void *worker_thread(void *data) {
                     if (x2+shiftx < -30000000 || x2+shiftx > 30000000) continue;
                     for (int shiftz = (-4194304)*7; shiftz <= (4194304)*7; shiftz += 4194304) {
                         if (z2+shiftz < -30000000 || z2+shiftz > 30000000) continue;
-                        int score = check_candidate_seed(to_unsigned(i), x2+shiftx, z2+shiftz);
-                        if (score > best[0]) {
-                            best[0] = score;
-                            best[1] = i;
-                            best[2] = x2+shiftx;
-                            best[3] = z2+shiftz;
+                        int cells_visited = 0;
+                        int score = check_candidate_seed(&n, x2+shiftx, z2+shiftz,
+                            &scratch, erosion_order, &cells_visited);
+                        if (score > 6) {
                             pthread_mutex_lock(&output_mutex);
                             if (progress_line_active)
                                 fputc('\n', stderr);
-                            fprintf(stderr, "Thread %d new best score: %d\n",
-                                args->id, score);
+                            fprintf(stderr, "[GOT RESULT] seed=%" PRId64
+                                ", start=(%d, %d), block_size=%d, cells_visited=%d\n",
+                                to_unsigned(i), x2+shiftx, z2+shiftz,
+                                score, cells_visited);
+                            fprintf(args->results_file, "[GOT RESULT] seed=%" PRId64
+                                ", start=(%d, %d), block_size=%d, cells_visited=%d\n",
+                                to_unsigned(i), x2+shiftx, z2+shiftz,
+                                score, cells_visited);
+                            fflush(args->results_file);
                             progress_line_active = 0;
                             pthread_mutex_unlock(&output_mutex);
                         }
@@ -247,21 +313,23 @@ static void *worker_thread(void *data) {
 
 int main(int argc, char **argv)
 {
+    int64_t first_seed = 0;
     uint64_t total_seeds = 10000;
     uint64_t requested_threads = 4;
     uint64_t thread_count;
-    uint64_t next_seed = 0;
+    uint64_t next_offset = 0;
+    uint64_t last_reported = 0;
     atomic_uint_fast64_t completed_seeds = 0;
     atomic_uint finished_threads = 0;
     pthread_t *threads;
     WorkerArgs *args;
     size_t started = 0;
-    int64_t best[4] = {-1, -1, -1, -1};
     struct timespec start, now;
 
-    if (argc > 3 || (argc > 1 && !parse_positive_u64(argv[1], &requested_threads)) ||
-        (argc > 2 && !parse_positive_u64(argv[2], &total_seeds))) {
-        fprintf(stderr, "Usage: %s [threads] [seed-count]\n", argv[0]);
+    if (argc > 4 || (argc > 1 && !parse_i64(argv[1], &first_seed)) ||
+        (argc > 2 && !parse_positive_u64(argv[2], &total_seeds)) ||
+        (argc > 3 && !parse_positive_u64(argv[3], &requested_threads))) {
+        fprintf(stderr, "Usage: %s [l] [seeds] [threads]\n", argv[0]);
         return EXIT_FAILURE;
     }
     thread_count = requested_threads < total_seeds ? requested_threads : total_seeds;
@@ -279,20 +347,23 @@ int main(int argc, char **argv)
         free(args);
         return EXIT_FAILURE;
     }
+    FILE *results_file = fopen("results.txt", "w");
+    if (!results_file) {
+        perror("results.txt");
+        free(threads);
+        free(args);
+        return EXIT_FAILURE;
+    }
 
     clock_gettime(CLOCK_MONOTONIC, &start);
     for (uint64_t i = 0; i < thread_count; i++) {
         uint64_t count = total_seeds / thread_count + (i < total_seeds % thread_count);
-        args[i].id = (int)i;
-        args[i].start_seed = (int64_t)next_seed;
-        args[i].end_seed = (int64_t)(next_seed + count);
+        args[i].start_seed_bits = (uint64_t)first_seed + next_offset;
+        args[i].seed_count = count;
+        args[i].results_file = results_file;
         args[i].completed_seeds = &completed_seeds;
         args[i].finished_threads = &finished_threads;
-        args[i].best[0] = -1;
-        args[i].best[1] = -1;
-        args[i].best[2] = -1;
-        args[i].best[3] = -1;
-        next_seed += count;
+        next_offset += count;
 
         int error = pthread_create(&threads[i], NULL, worker_thread, &args[i]);
         if (error) {
@@ -305,6 +376,7 @@ int main(int argc, char **argv)
     if (started != thread_count) {
         for (size_t i = 0; i < started; i++)
             pthread_join(threads[i], NULL);
+        fclose(results_file);
         free(threads);
         free(args);
         return EXIT_FAILURE;
@@ -321,6 +393,7 @@ int main(int argc, char **argv)
             ") | %.0f seeds/s | %.1fs elapsed",
             100.0 * completed / total_seeds, completed, total_seeds,
             elapsed > 0 ? completed / elapsed : 0, elapsed);
+        last_reported = completed;
         progress_line_active = 1;
         fflush(stderr);
         pthread_mutex_unlock(&output_mutex);
@@ -330,21 +403,15 @@ int main(int argc, char **argv)
     clock_gettime(CLOCK_MONOTONIC, &now);
     double elapsed = elapsed_seconds(start, now);
     uint64_t completed = atomic_load_explicit(&completed_seeds, memory_order_relaxed);
-    fprintf(stderr, "\nProgress: 100.00%% (%" PRIu64 "/%" PRIu64
-        ") | %.0f seeds/s | %.1fs elapsed\n",
-        completed, total_seeds, elapsed > 0 ? completed / elapsed : 0, elapsed);
-
-    for (size_t i = 0; i < started; i++) {
-        if (args[i].best[0] > best[0]) {
-            for (int j = 0; j < 4; j++)
-                best[j] = args[i].best[j];
-        }
+    if (last_reported < total_seeds) {
+        fprintf(stderr, "\nProgress: 100.00%% (%" PRIu64 "/%" PRIu64
+            ") | %.0f seeds/s | %.1fs elapsed\n",
+            completed, total_seeds, elapsed > 0 ? completed / elapsed : 0, elapsed);
+    } else if (progress_line_active) {
+        fputc('\n', stderr);
     }
-    printf("Best score: %" PRId64 "\n", best[0]);
-    printf("Best seed: %" PRId64 "\n", best[1]);
-    printf("Best position: (%" PRId64 ", %" PRId64 ")\n", best[2], best[3]);
-    printf("Elapsed: %.1f seconds; average speed: %.0f seeds/s\n",
-        elapsed, elapsed > 0 ? completed / elapsed : 0);
+
+    fclose(results_file);
     free(threads);
     free(args);
     return 0;

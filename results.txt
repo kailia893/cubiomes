@@ -1,0 +1,1 @@
+[GOT RESULT] seed=83205, start=(26214400, -15728640), block_size=7208850, cells_visited=110
