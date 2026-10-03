@@ -133,13 +133,13 @@ int check_candidate_seed(LbNoise *n, int64_t x, int64_t z,
         if (temperature < 5500) {
             continue;
         }
-        int humidity = lb_octave_prefix_sum(n, NP_HUMIDITY, 2, cx, cz);
+        int humidity = lb_octave_prefix_sum(n, NP_HUMIDITY, 4, cx, cz);
         if (humidity < 1000)
             return 6;
-        int erosion = lb_octave_prefix_sum(n, NP_EROSION, 4, cx, cz);
+        int erosion = lb_octave_prefix_sum(n, NP_EROSION, 6, cx, cz);
         if (erosion > -4000)
             return 6;
-        int continental = lb_octave_prefix_sum(n, NP_CONTINENTALNESS, 2, cx, cz);
+        int continental = lb_octave_prefix_sum(n, NP_CONTINENTALNESS, 8, cx, cz);
         if (continental < 0)
             return 6;
         visited++;
@@ -148,9 +148,6 @@ int check_candidate_seed(LbNoise *n, int64_t x, int64_t z,
         for (int dir = 0; dir < 4; dir++) {
             int nx = cx + dx[dir];
             int nz = cz + dz[dir];
-            if (nx < -30000000 || nx > 30000000 || nz < -30000000 || nz > 30000000) {
-                continue;
-            }
             if (!floodfill_mark(scratch, nx, nz)) {
                 continue;
             }
@@ -278,10 +275,8 @@ static void *worker_thread(void *data) {
                 }
                 if(!notbad) continue;
                 //printf("Seed: %ld, Tile: (%d, %d), Subtile: (%d, %d)\n", i, x, z, x2, z2);
-                for (int shiftx = (-4194304)*7; shiftx <= (4194304)*7; shiftx += 4194304) {
-                    if (x2+shiftx < -30000000 || x2+shiftx > 30000000) continue;
-                    for (int shiftz = (-4194304)*7; shiftz <= (4194304)*7; shiftz += 4194304) {
-                        if (z2+shiftz < -30000000 || z2+shiftz > 30000000) continue;
+                for (int shiftx = (-4194304)*165; shiftx <= (4194304)*165; shiftx += 4194304) {
+                    for (int shiftz = (-4194304)*165; shiftz <= (4194304)*165; shiftz += 4194304) {
                         int cells_visited = 0;
                         int score = check_candidate_seed(&n, x2+shiftx, z2+shiftz,
                             &scratch, erosion_order, &cells_visited);
