@@ -1,6 +1,0 @@
-[GOT RESULT] seed=2354497332, start=(164626432, -47185920), block_size=11534160, cells_visited=176
-[GOT RESULT] seed=2355790415, start=(-123731968, 69206016), block_size=9305970, cells_visited=142
-[GOT RESULT] seed=2356234289, start=(-157286400, 16777216), block_size=7667595, cells_visited=117
-[GOT RESULT] seed=2359269014, start=(56623104, -163577856), block_size=10682205, cells_visited=163
-[GOT RESULT] seed=2360703178, start=(-51380224, 29360128), block_size=16711425, cells_visited=255
-[GOT RESULT] seed=2362358606, start=(-126877696, 10485760), block_size=14155560, cells_visited=216

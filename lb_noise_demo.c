@@ -57,6 +57,11 @@ static int progress_line_active;
 
 #define FLOOD_QUEUE_CAPACITY 20000
 #define FLOOD_HASH_CAPACITY 65536
+#define FLOOD_TILING_RADIUS 41
+#define FLOOD_TILING_WIDTH (2 * FLOOD_TILING_RADIUS + 1)
+#define TEMPERATURE_0A_TILE_BLOCKS (4096LL * 256 * 4)
+// Full humidity-noise repeat: 331 times its 0A tile in block coordinates.
+#define HUMIDITY_REPEAT_BLOCKS (331LL * 1024 * 256 * 4)
 
 typedef struct {
     int queue[FLOOD_QUEUE_CAPACITY][2];
@@ -87,36 +92,21 @@ static int floodfill_mark(FloodFillScratch *scratch, int x, int z)
     return 1;
 }
 
-int check_candidate_seed(LbNoise *n, int64_t x, int64_t z,
-    FloodFillScratch *scratch, const int erosion_order[4], int *cells_visited) {
-    // The cheaper two-component humidity checks can reject before erosion's four.
-    for (int i = 0; i < 4; i++) {
-        if (lb_octave_prefix_sum(n, NP_HUMIDITY, 2,
-            x + positions[i][0], z + positions[i][1]) < 1000) return 1;
-    }
-    for (int i = 0; i < 4; i++) {
-        int position = erosion_order[i];
-        if (lb_octave_prefix_sum(n, NP_EROSION, 4, 
-            x + positions[position][0], z + positions[position][1]) > -4000) return 0;
-    }
-    for (int i = 0; i < 4; i++) {
-        if (lb_octave_prefix_sum(n, NP_TEMPERATURE, 4, 
-            x + positions[i][0], z + positions[i][1]) < 5500) return 2;
-    }
-    for (int i = 0; i < 4; i++) {
-        if (lb_octave_prefix_sum(n, NP_CONTINENTALNESS, 2, 
-            x + positions[i][0], z + positions[i][1]) < 0) return 3;
-    }
-    int center_temperature = lb_octave_prefix_sum(n, NP_TEMPERATURE, 4, x, z);
-    if (center_temperature < 5500) return 4;
-    for (int i = 0; i < 6; i++) {
-        for (int j = 0; j < 4; j++) {
-            if (lb_octave_prefix_sum(n, NP_TEMPERATURE, 4, 
-                x + templimit[i][0] * multipliers[j][0], 
-                z + templimit[i][1] * multipliers[j][1]) > 5500) return 5;
-        }
-    }
-    //Floodfill
+static int extend_prefix_sum(LbNoise *n, int parameter, int from, int to,
+    int x, int z, int sum)
+{
+    for (int i = from; i < to; i++)
+        sum += lb_octave_int(n, parameter, i / 2,
+            (i & 1) ? 'B' : 'A', x, z);
+    return sum;
+}
+
+static int temperature_floodfill(LbNoise *n, int64_t x, int64_t z,
+    int center_temperature, FloodFillScratch *scratch, int *cells_visited)
+{
+    if (center_temperature < 5500)
+        return 0;
+
     if (++scratch->generation == 0) {
         memset(scratch->generations, 0, sizeof(scratch->generations));
         scratch->generation = 1;
@@ -132,13 +122,12 @@ int check_candidate_seed(LbNoise *n, int64_t x, int64_t z,
         int cx = queue[head][0];
         int cz = queue[head][1];
         head++;
-        // Reuse the precheck only when the queued int coordinate is unchanged.
         int temperature = head == 1 && (int64_t)cx == x && (int64_t)cz == z
             ? center_temperature
             : lb_octave_prefix_sum(n, NP_TEMPERATURE, 4, cx, cz);
-        if (temperature < 5500) {
+        if (temperature < 5500)
             continue;
-        }
+
         int humidity = lb_octave_prefix_sum(n, NP_HUMIDITY, 4, cx, cz);
         if (humidity < 1000)
             return 6;
@@ -148,16 +137,15 @@ int check_candidate_seed(LbNoise *n, int64_t x, int64_t z,
         int continental = lb_octave_prefix_sum(n, NP_CONTINENTALNESS, 8, cx, cz);
         if (continental < 0)
             return 6;
+
         visited++;
         for (int dir = 0; dir < 4; dir++) {
             int nx = cx + flood_dx[dir];
             int nz = cz + flood_dz[dir];
-            if (!floodfill_mark(scratch, nx, nz)) {
+            if (!floodfill_mark(scratch, nx, nz))
                 continue;
-            }
-            if (tail >= FLOOD_QUEUE_CAPACITY) {
+            if (tail >= FLOOD_QUEUE_CAPACITY)
                 return 6;
-            }
             queue[tail][0] = nx;
             queue[tail][1] = nz;
             tail++;
@@ -165,6 +153,161 @@ int check_candidate_seed(LbNoise *n, int64_t x, int64_t z,
     }
     *cells_visited = visited;
     return 65535 * visited;
+}
+
+static int check_temperature_candidate(LbNoise *n, int64_t x, int64_t z,
+    FloodFillScratch *scratch, int *cells_visited)
+{
+    for (int i = 0; i < 4; i++) {
+        if (lb_octave_prefix_sum(n, NP_TEMPERATURE, 4,
+            x + positions[i][0], z + positions[i][1]) < 5500)
+            return 0;
+    }
+    int center_temperature = lb_octave_prefix_sum(n, NP_TEMPERATURE, 4, x, z);
+    if (center_temperature < 5500)
+        return 0;
+    for (int i = 0; i < 6; i++) {
+        for (int j = 0; j < 4; j++) {
+            if (lb_octave_prefix_sum(n, NP_TEMPERATURE, 4,
+                x + templimit[i][0] * multipliers[j][0],
+                z + templimit[i][1] * multipliers[j][1]) > 5500)
+                return 0;
+        }
+    }
+    return temperature_floodfill(n, x, z, center_temperature,
+        scratch, cells_visited);
+}
+
+int check_candidate_seed(LbNoise *n, int64_t x, int64_t z,
+    FloodFillScratch *scratch, const int erosion_order[4],
+    int *cells_visited, int64_t *found_x, int64_t *found_z)
+{
+    uint8_t humidity_map[FLOOD_TILING_WIDTH][FLOOD_TILING_WIDTH];
+    int humidity_prefix2[FLOOD_TILING_WIDTH][FLOOD_TILING_WIDTH][4];
+    const int64_t tile_step = TEMPERATURE_0A_TILE_BLOCKS;
+
+    for (int ix = -FLOOD_TILING_RADIUS; ix <= FLOOD_TILING_RADIUS; ix++) {
+        for (int iz = -FLOOD_TILING_RADIUS; iz <= FLOOD_TILING_RADIUS; iz++) {
+            int64_t hx = x + ix * tile_step;
+            int64_t hz = z + iz * tile_step;
+            int valid = 1;
+            for (int i = 0; i < 4; i++) {
+                int prefix = lb_octave_prefix_sum(n, NP_HUMIDITY, 2,
+                    hx + positions[i][0], hz + positions[i][1]);
+                humidity_prefix2[ix + FLOOD_TILING_RADIUS]
+                    [iz + FLOOD_TILING_RADIUS][i] = prefix;
+                if (prefix < 1000) {
+                    valid = 0;
+                    break;
+                }
+            }
+            humidity_map[ix + FLOOD_TILING_RADIUS][iz + FLOOD_TILING_RADIUS] =
+                (uint8_t)valid;
+        }
+    }
+
+    for (int ix = -FLOOD_TILING_RADIUS; ix <= FLOOD_TILING_RADIUS; ix++) {
+        for (int iz = -FLOOD_TILING_RADIUS; iz <= FLOOD_TILING_RADIUS; iz++) {
+            if (!humidity_map[ix + FLOOD_TILING_RADIUS][iz + FLOOD_TILING_RADIUS])
+                continue;
+
+            int64_t hx = x + ix * tile_step;
+            int64_t hz = z + iz * tile_step;
+            int valid = 1;
+            for (int i = 0; i < 4; i++) {
+                int humidity = extend_prefix_sum(n, NP_HUMIDITY, 2, 4,
+                    hx + positions[i][0], hz + positions[i][1],
+                    humidity_prefix2[ix + FLOOD_TILING_RADIUS]
+                        [iz + FLOOD_TILING_RADIUS][i]);
+                if (humidity < 1000) {
+                    valid = 0;
+                    break;
+                }
+            }
+            if (!valid)
+                continue;
+
+            // Erosion and continentalness repeat every two humidity periods.
+            for (int ex = 0; ex < 2; ex++) {
+                for (int ez = 0; ez < 2; ez++) {
+                    int64_t ex_origin = hx + ex * HUMIDITY_REPEAT_BLOCKS;
+                    int64_t ez_origin = hz + ez * HUMIDITY_REPEAT_BLOCKS;
+                    valid = 1;
+                    int erosion_prefix4[4];
+
+                    for (int i = 0; i < 4; i++) {
+                        int position = erosion_order[i];
+                        erosion_prefix4[i] = lb_octave_prefix_sum(n, NP_EROSION, 4,
+                            ex_origin + positions[position][0],
+                            ez_origin + positions[position][1]);
+                        if (erosion_prefix4[i] > -4000) {
+                            valid = 0;
+                            break;
+                        }
+                    }
+                    if (!valid)
+                        continue;
+                    for (int i = 0; i < 4; i++) {
+                        int position = erosion_order[i];
+                        int erosion = extend_prefix_sum(n, NP_EROSION, 4, 6,
+                            ex_origin + positions[position][0],
+                            ez_origin + positions[position][1],
+                            erosion_prefix4[i]);
+                        if (erosion > -4000) {
+                            valid = 0;
+                            break;
+                        }
+                    }
+                    if (!valid)
+                        continue;
+                    int continental_prefix2[4];
+                    for (int i = 0; i < 4; i++) {
+                        continental_prefix2[i] = lb_octave_prefix_sum(n,
+                            NP_CONTINENTALNESS, 2,
+                            ex_origin + positions[i][0],
+                            ez_origin + positions[i][1]);
+                        if (continental_prefix2[i] < 0) {
+                            valid = 0;
+                            break;
+                        }
+                    }
+                    if (!valid)
+                        continue;
+                    for (int i = 0; i < 4; i++) {
+                        int continental = extend_prefix_sum(n,
+                            NP_CONTINENTALNESS, 2, 8,
+                            ex_origin + positions[i][0],
+                            ez_origin + positions[i][1], continental_prefix2[i]);
+                        if (continental < 0) {
+                            valid = 0;
+                            break;
+                        }
+                    }
+                    if (!valid)
+                        continue;
+
+                    // Temperature repeats every four humidity periods.
+                    for (int tx = 0; tx < 2; tx++) {
+                        for (int tz = 0; tz < 2; tz++) {
+                            int64_t candidate_x = ex_origin +
+                                tx * 2 * HUMIDITY_REPEAT_BLOCKS;
+                            int64_t candidate_z = ez_origin +
+                                tz * 2 * HUMIDITY_REPEAT_BLOCKS;
+                            int score = check_temperature_candidate(n,
+                                candidate_x, candidate_z, scratch,
+                                cells_visited);
+                            if (score > 6) {
+                                *found_x = candidate_x;
+                                *found_z = candidate_z;
+                                return score;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 0;
 }
 typedef struct {
     uint64_t start_seed_bits;
@@ -279,29 +422,26 @@ static void *worker_thread(void *data) {
                 }
                 if(!notbad) continue;
                 //printf("Seed: %ld, Tile: (%d, %d), Subtile: (%d, %d)\n", i, x, z, x2, z2);
-                const int limitt = 41; //It can go past world border, because potatoes does not look as well in game as on the seed map which lets more efficient tiling.
-                for (int shiftx = (-4194304)*limitt; shiftx <= (4194304)*limitt; shiftx += 4194304) {
-                    for (int shiftz = (-4194304)*limitt; shiftz <= (4194304)*limitt; shiftz += 4194304) {
-                        int cells_visited = 0;
-                        int score = check_candidate_seed(&n, x2+shiftx, z2+shiftz,
-                            &scratch, erosion_order, &cells_visited);
-                        if (score > 6) {
-                            pthread_mutex_lock(&output_mutex);
-                            if (progress_line_active)
-                                fputc('\n', stderr);
-                            fprintf(stderr, "[GOT RESULT] seed=%" PRId64
-                                ", start=(%d, %d), block_size=%d, cells_visited=%d\n",
-                                to_unsigned(i), x2+shiftx, z2+shiftz,
-                                score, cells_visited);
-                            fprintf(args->results_file, "[GOT RESULT] seed=%" PRId64
-                                ", start=(%d, %d), block_size=%d, cells_visited=%d\n",
-                                to_unsigned(i), x2+shiftx, z2+shiftz,
-                                score, cells_visited);
-                            fflush(args->results_file);
-                            progress_line_active = 0;
-                            pthread_mutex_unlock(&output_mutex);
-                        }
-                    }
+                int cells_visited = 0;
+                int64_t found_x = 0;
+                int64_t found_z = 0;
+                int score = check_candidate_seed(&n, x2, z2,
+                    &scratch, erosion_order, &cells_visited, &found_x, &found_z);
+                if (score > 6) {
+                    pthread_mutex_lock(&output_mutex);
+                    if (progress_line_active)
+                        fputc('\n', stderr);
+                    fprintf(stderr, "[GOT RESULT] seed=%" PRId64
+                        ", start=(%" PRId64 ", %" PRId64
+                        "), block_size=%d, cells_visited=%d\n",
+                        to_unsigned(i), found_x, found_z, score, cells_visited);
+                    fprintf(args->results_file, "[GOT RESULT] seed=%" PRId64
+                        ", start=(%" PRId64 ", %" PRId64
+                        "), block_size=%d, cells_visited=%d\n",
+                        to_unsigned(i), found_x, found_z, score, cells_visited);
+                    fflush(args->results_file);
+                    progress_line_active = 0;
+                    pthread_mutex_unlock(&output_mutex);
                 }
             }
         }
