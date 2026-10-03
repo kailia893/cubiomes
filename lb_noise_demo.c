@@ -225,7 +225,7 @@ static void *worker_thread(void *data) {
         int bad = 0;
         for (int j = 0; j < 5; j++) {
             if (lb_octave_int(&n, NP_HUMIDITY, 0, 'A', 
-                positions[j][0], positions[j][1]) < -1500) bad = 1;
+                positions[j][0], positions[j][1]) < -500) bad = 1;
             if(bad) break;
         }
         if (bad) {
@@ -242,7 +242,7 @@ static void *worker_thread(void *data) {
             for (int k = 0; k < 5; k++) {
                 erosion_a0[k] = lb_octave_int(&n, NP_EROSION, 0, 'A',
                     x + positions[k][0], z + positions[k][1]);
-                if (erosion_a0[k] > 0) notbad = 0;
+                if (erosion_a0[k] > -1000) notbad = 0;
                 if (!notbad) break;
             }
             if(!notbad) continue;
@@ -258,7 +258,7 @@ static void *worker_thread(void *data) {
             for (int k = 0; k < 5; k++) {
                 if (lb_octave_int(&n, NP_CONTINENTALNESS, 0, 'A', 
                     x + positions[k][0], z + positions[k][1]
-                    ) < -2000) notbad = 0;
+                    ) < -1000) notbad = 0;
                 if (!notbad) break;
             }
             if(!notbad) continue;
@@ -270,13 +270,14 @@ static void *worker_thread(void *data) {
                 for (int l = 0; l < 5; l++) {
                     if (lb_octave_int(&n, NP_TEMPERATURE, 0, 'A', 
                         x2 + positions[l][0], z2 + positions[l][1]
-                        ) < -500) notbad = 0;
+                        ) < 0) notbad = 0;
                     if (!notbad) break;
                 }
                 if(!notbad) continue;
                 //printf("Seed: %ld, Tile: (%d, %d), Subtile: (%d, %d)\n", i, x, z, x2, z2);
-                for (int shiftx = (-4194304)*165; shiftx <= (4194304)*165; shiftx += 4194304) {
-                    for (int shiftz = (-4194304)*165; shiftz <= (4194304)*165; shiftz += 4194304) {
+                const int limitt = 41; //It can go past world border, because potatoes does not look as well in game as on the seed map which lets more efficient tiling.
+                for (int shiftx = (-4194304)*limitt; shiftx <= (4194304)*limitt; shiftx += 4194304) {
+                    for (int shiftz = (-4194304)*limitt; shiftz <= (4194304)*limitt; shiftz += 4194304) {
                         int cells_visited = 0;
                         int score = check_candidate_seed(&n, x2+shiftx, z2+shiftz,
                             &scratch, erosion_order, &cells_visited);
