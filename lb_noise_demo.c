@@ -262,7 +262,7 @@ static void *worker_thread(void *data) {
             for (int k = 0; k < 5; k++) {
                 if (lb_octave_int(&n, NP_CONTINENTALNESS, 0, 'A', 
                     x + positions[k][0], z + positions[k][1]
-                    ) < -300) notbad = 0;
+                    ) < -100) notbad = 0;
                 if (!notbad) break;
             }
             if(!notbad) continue;
@@ -274,7 +274,7 @@ static void *worker_thread(void *data) {
                 for (int l = 0; l < 5; l++) {
                     if (lb_octave_int(&n, NP_TEMPERATURE, 0, 'A', 
                         x2 + positions[l][0], z2 + positions[l][1]
-                        ) < 500) notbad = 0;
+                        ) < 3000) notbad = 0;
                     if (!notbad) break;
                 }
                 if(!notbad) continue;
