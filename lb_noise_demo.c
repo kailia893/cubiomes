@@ -50,6 +50,8 @@ int multipliers[4][2] = {
     {-1,1},
     {-1,-1}
 };
+static const int flood_dx[4] = {256, -256, 0, 0};
+static const int flood_dz[4] = {0, 0, 256, -256};
 static pthread_mutex_t output_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int progress_line_active;
 
@@ -87,15 +89,15 @@ static int floodfill_mark(FloodFillScratch *scratch, int x, int z)
 
 int check_candidate_seed(LbNoise *n, int64_t x, int64_t z,
     FloodFillScratch *scratch, const int erosion_order[4], int *cells_visited) {
-    //Early filters
+    // The cheaper two-component humidity checks can reject before erosion's four.
+    for (int i = 0; i < 4; i++) {
+        if (lb_octave_prefix_sum(n, NP_HUMIDITY, 2,
+            x + positions[i][0], z + positions[i][1]) < 1000) return 1;
+    }
     for (int i = 0; i < 4; i++) {
         int position = erosion_order[i];
         if (lb_octave_prefix_sum(n, NP_EROSION, 4, 
             x + positions[position][0], z + positions[position][1]) > -4000) return 0;
-    }
-    for (int i = 0; i < 4; i++) {
-        if (lb_octave_prefix_sum(n, NP_HUMIDITY, 2, 
-            x + positions[i][0], z + positions[i][1]) < 1000) return 1;
     }
     for (int i = 0; i < 4; i++) {
         if (lb_octave_prefix_sum(n, NP_TEMPERATURE, 4, 
@@ -105,7 +107,8 @@ int check_candidate_seed(LbNoise *n, int64_t x, int64_t z,
         if (lb_octave_prefix_sum(n, NP_CONTINENTALNESS, 2, 
             x + positions[i][0], z + positions[i][1]) < 0) return 3;
     }
-    if (lb_octave_prefix_sum(n, NP_TEMPERATURE, 4, x, z) < 5500) return 4;
+    int center_temperature = lb_octave_prefix_sum(n, NP_TEMPERATURE, 4, x, z);
+    if (center_temperature < 5500) return 4;
     for (int i = 0; i < 6; i++) {
         for (int j = 0; j < 4; j++) {
             if (lb_octave_prefix_sum(n, NP_TEMPERATURE, 4, 
@@ -129,7 +132,10 @@ int check_candidate_seed(LbNoise *n, int64_t x, int64_t z,
         int cx = queue[head][0];
         int cz = queue[head][1];
         head++;
-        int temperature = lb_octave_prefix_sum(n, NP_TEMPERATURE, 4, cx, cz);
+        // Reuse the precheck only when the queued int coordinate is unchanged.
+        int temperature = head == 1 && (int64_t)cx == x && (int64_t)cz == z
+            ? center_temperature
+            : lb_octave_prefix_sum(n, NP_TEMPERATURE, 4, cx, cz);
         if (temperature < 5500) {
             continue;
         }
@@ -143,11 +149,9 @@ int check_candidate_seed(LbNoise *n, int64_t x, int64_t z,
         if (continental < 0)
             return 6;
         visited++;
-        int dx[4] = {256, -256, 0, 0};
-        int dz[4] = {0, 0, 256, -256};
         for (int dir = 0; dir < 4; dir++) {
-            int nx = cx + dx[dir];
-            int nz = cz + dz[dir];
+            int nx = cx + flood_dx[dir];
+            int nz = cz + flood_dz[dir];
             if (!floodfill_mark(scratch, nx, nz)) {
                 continue;
             }
@@ -225,7 +229,7 @@ static void *worker_thread(void *data) {
         int bad = 0;
         for (int j = 0; j < 5; j++) {
             if (lb_octave_int(&n, NP_HUMIDITY, 0, 'A', 
-                positions[j][0], positions[j][1]) < -500) bad = 1;
+                positions[j][0], positions[j][1]) < 500) bad = 1;
             if(bad) break;
         }
         if (bad) {
@@ -242,7 +246,7 @@ static void *worker_thread(void *data) {
             for (int k = 0; k < 5; k++) {
                 erosion_a0[k] = lb_octave_int(&n, NP_EROSION, 0, 'A',
                     x + positions[k][0], z + positions[k][1]);
-                if (erosion_a0[k] > -1000) notbad = 0;
+                if (erosion_a0[k] > -1700) notbad = 0;
                 if (!notbad) break;
             }
             if(!notbad) continue;
@@ -258,7 +262,7 @@ static void *worker_thread(void *data) {
             for (int k = 0; k < 5; k++) {
                 if (lb_octave_int(&n, NP_CONTINENTALNESS, 0, 'A', 
                     x + positions[k][0], z + positions[k][1]
-                    ) < -1000) notbad = 0;
+                    ) < -300) notbad = 0;
                 if (!notbad) break;
             }
             if(!notbad) continue;
@@ -270,7 +274,7 @@ static void *worker_thread(void *data) {
                 for (int l = 0; l < 5; l++) {
                     if (lb_octave_int(&n, NP_TEMPERATURE, 0, 'A', 
                         x2 + positions[l][0], z2 + positions[l][1]
-                        ) < 0) notbad = 0;
+                        ) < 500) notbad = 0;
                     if (!notbad) break;
                 }
                 if(!notbad) continue;

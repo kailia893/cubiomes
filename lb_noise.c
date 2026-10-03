@@ -45,7 +45,7 @@ static int init(LbNoise *n, int p)
     return 1;
 }
 
-static int part(const DoublePerlinNoise *d, int o, char ab,
+static inline int part(const DoublePerlinNoise *d, int o, char ab,
     double x, double z, double *v)
 {
     const OctaveNoise *s;
@@ -92,17 +92,21 @@ int lb_octave_int(LbNoise *n, int p, int o, char ab, double x, double z){
 
 int lb_octave_prefix_sum(LbNoise *n, int p, int o, double x, double z){
     int sum = 0;
-    int idx = 0;
-    for(int i = 0; i < o; i++){
-        if (idx == 0) {
-            sum += lb_octave_int(n, p, i/2, 'A', x, z);
-            idx = 1;
-        }
-        else {
-            sum += lb_octave_int(n, p, i/2, 'B', x, z);
-            idx = 0;
-        }
+    const double sample_x = x / 4;
+    const double sample_z = z / 4;
 
+    if (o <= 0)
+        return 0;
+    if (!n || !valid_parameter(p) ||
+        o > 2 * octave_counts[p] || !init(n, p))
+        return 0;
+
+    const DoublePerlinNoise *d = &n->climate[p];
+    for (int i = 0; i < o; i++) {
+        double v;
+        char ab = (i & 1) ? 'B' : 'A';
+        if (part(d, i / 2, ab, sample_x, sample_z, &v))
+            sum += (int)(v * 10000);
     }
     return sum;
 }

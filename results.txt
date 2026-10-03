@@ -1,2 +1,3 @@
-[GOT RESULT] seed=87377, start=(-20971520, -126877696), block_size=15662865, cells_visited=239
-[GOT RESULT] seed=162937, start=(104857600, 125829120), block_size=8454015, cells_visited=129
+[GOT RESULT] seed=423564441162, start=(119537664, -120586240), block_size=13565745, cells_visited=207
+[GOT RESULT] seed=423565291064, start=(77594624, -100663296), block_size=13631280, cells_visited=208
+[GOT RESULT] seed=423565314112, start=(162529280, 65011712), block_size=9699180, cells_visited=148
